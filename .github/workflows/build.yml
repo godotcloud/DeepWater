@@ -1,0 +1,96 @@
+# FILE: .github/workflows/build.yml
+name: Build DeepWater Sim iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    name: Extract, Generate Xcode Project & Build Unsigned IPA
+    runs-on: macos-15
+
+    env:
+      PROJECT_NAME: DeepWaterSim
+      SCHEME_NAME: DeepWaterSim
+      ZIP_FILENAME: DeepWaterSim_Project.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Auto-extract ZIP archive if present
+        run: |
+          if [ -f "$ZIP_FILENAME" ]; then
+            echo "Detected $ZIP_FILENAME in repository root. Extracting..."
+            unzip -o "$ZIP_FILENAME" -d .
+          elif [ -d "Sources" ]; then
+            echo "Sources/ directory already present. Skipping unzip."
+          else
+            echo "Error: Neither $ZIP_FILENAME nor Sources/ found in repository root."
+            exit 1
+          fi
+          ls -la
+          find Sources -type f | sort
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project via XcodeGen
+        run: |
+          xcodegen generate --spec project.yml
+
+      - name: Build Unsigned Release App for iOS Device (arm64)
+        run: |
+          xcodebuild \
+            -project "${PROJECT_NAME}.xcodeproj" \
+            -scheme "${SCHEME_NAME}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedData \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Package Unsigned IPA
+        run: |
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/${PROJECT_NAME}.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Error: Built .app bundle not found at $APP_PATH"
+            exit 1
+          fi
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          cd build/ipa
+          zip -qry "../../${PROJECT_NAME}.ipa" Payload
+          cd ../..
+          ls -lh "${PROJECT_NAME}.ipa"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeepWaterSim-iOS-IPA
+          path: DeepWaterSim.ipa
+          retention-days: 30
+
+      - name: Publish IPA to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_NUM: ${{ github.run_number }}
+        run: |
+          TAG="v1.0.${RUN_NUM}"
+          gh release create "$TAG" "${PROJECT_NAME}.ipa" \
+            --title "DeepWater Sim ${TAG}" \
+            --notes "Automated unsigned iOS arm64 build for iPhone 13 Pro Max (A15 Bionic, iOS 17+)."
